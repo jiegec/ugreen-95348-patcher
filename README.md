@@ -8,6 +8,10 @@ The approach follows
 [steve-m/ms2130_patcher](https://github.com/steve-m/ms2130_patcher), which bakes
 hsdaoh's transparent-mode register writes into an MS2130 firmware.
 
+The reverse engineering and measurements behind this fix are written up in the
+accompanying [blog post](https://jia.je/hardware/2026/09/12/fix-ugreen-95348/)
+(in Chinese).
+
 > **Back up your original firmware before flashing anything.** The patcher
 > refuses to touch a file whose checksums do not match the one revision it
 > was written for, but flashing a wrong image can still brick the device.
