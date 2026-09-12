@@ -140,7 +140,7 @@ first). Its `known_devices[]` table does not know the UGREEN stick's USB ID
  	{ 0x345f, 0x2132, 4, true,  "MS2130S" },
  	{ 0x345f, 0x2133, 4, true,  "MS2131S" },
  	{ 0x345f, 0x0001, 0, true,  "MS213xS-ROM" },
-+	{ 0x2b89, 0x5348, 0, true,  "UGREEN" },
++	{ 0x2b89, 0x5348, 4, true,  "UGREEN" },
  };
 ```
 
