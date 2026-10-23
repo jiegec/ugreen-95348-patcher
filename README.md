@@ -27,7 +27,7 @@ make
 | output | contents |
 |---|---|
 | `…_0xfc8e_0xfc8f_0x11.bin` | register fix only (proc-amp bypassed) |
-| `…_0xfc8e_0xfc8f_0x11_edid_srgb_qsqy.bin` | register fix **+ EDID**: sRGB declared, VCDB `QY=1`/`QS=1` |
+| `…_0xfc8e_0xfc8f_0x11_edid_srgb_rgb444_4k30.bin` | register fix **+ EDID**: sRGB, RGB 4:4:4 only, 4K30 preferred, VCDB `QS=1` |
 
 Flash whichever you need (see [Flashing](#flashing)).
 
@@ -52,7 +52,7 @@ reset writes use `0x11` (luma/chroma processing disabled) instead.
 | `Makefile` | Builds the `ms2130s_patch` binary. |
 | `UGREEN_undated_backup_24dc_797c.bin` | Original UGREEN 95348 firmware dump. |
 | `UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11.bin` | Pre-built patched firmware (registers only), byte-for-byte identical to the output of the tool. |
-| `UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11_edid_srgb_qsqy.bin` | Pre-built patched firmware with the EDID changes (sRGB + `QY=1`/`QS=1`). |
+| `UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11_edid_srgb_rgb444_4k30.bin` | Pre-built patched firmware with the EDID changes (sRGB, RGB 4:4:4 only, 4K30 preferred, `QS=1`). |
 
 ## Build
 
@@ -72,7 +72,7 @@ All arguments are optional:
 
 * input:  `./UGREEN_undated_backup_24dc_797c.bin`
 * output: `./UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11.bin`
-* output with EDID fix: `./UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11_edid_srgb_qsqy.bin`
+* output with EDID fix: `./UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11_edid_srgb_rgb444_4k30.bin`
 
 If the input's header checksum is not `0x24dc` or its code checksum is not
 `0x797c`, the tool prints an error and refuses to patch: it is hard-wired to
@@ -91,10 +91,11 @@ Wrote patched firmware: ./UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11.bin
   0xfc8f bit 0 = 0x01 (processing disabled)
   0xfc8f bit 4 = 0x01 (processing disabled)
 
-EDID patched: feature byte 0x18 = 0x0e (RGB colour + sRGB), VCDB E2 00 c0 (QY=1, QS=1)
-  base checksum: b4, CTA checksum: b3, CTA DTD offset: 30
-New code checksum: 7b80
-Wrote patched firmware with EDID fix: ./UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11_edid_srgb_qsqy.bin
+EDID patched: feature byte 0x18 = 0x0e (RGB colour + sRGB), VCDB E2 00 4f (QS=1)
+  preferred timing: 3840x2160@30, CTA flags: 42 (no YCbCr 4:4:4/4:2:2, no 4:2:0)
+  base checksum: 2e, CTA checksum: d9, CTA DTD offset: 2a
+New code checksum: 7980
+Wrote patched firmware with EDID fix: ./UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11_edid_srgb_rgb444_4k30.bin
 ```
 
 ## How the patch works
@@ -143,41 +144,74 @@ sends **limited** range instead, and the result is wrong:
 | YCbCr limited | full | black 16 / white 235, washed out (grey 16 captures as 30) |
 | YCbCr full | full | correct |
 
-The EDID fix keeps the rest of the EDID intact and changes only what is needed
-to declare sRGB and to let the source use full-range RGB and YCbCr:
+On top of that the stock EDID makes sources pick YCbCr 4:4:4 (macOS does it
+for 4K30 even though the TMDS clock is identical to RGB) and it lists 4K only
+as CEA VICs, with 1080p as the preferred timing — which is why macOS offers a
+bare resolution list instead of its HiDPI "Larger Text / More Space" picker.
 
-| file offset | EDID offset | original | patched | why |
-|---:|---:|---:|---:|---|
-| `0x31f` | `0x18` | `0x02` | **`0x0e`** | bits 4:3 = `01` RGB colour display (stock `00` says **monochrome**), bit 2 = **sRGB**, bit 1 = preferred timing (kept) |
-| `0x3b4` | CTA data blocks | — | **`E2 00 c0`** | appended VCDB: **`QY=1`, `QS=1`** (YCC selectable via AVI `YQ`, RGB via AVI `Q`) |
-| `0x389` | CTA `[2]` | `0x2d` | **`0x30`** | DTD offset moved by the 3 inserted bytes |
-| `0x386` | `0x7f` | `0xc0` | **`0xb4`** | base block checksum |
-| `0x406` | CTA `[0x7f]` | `0x58` | **`0xb3`** | CTA extension checksum |
-| `0x18033` | — | `0x7c` | **`0x81`** | firmware code checksum `0x797c` → `0x7b80` (includes the register fix) |
+The EDID fix therefore:
+
+* declares **sRGB** and an **RGB colour** display,
+* makes **3840×2160@30 the preferred timing**, so the source treats the sink
+  as a native-4K panel (macOS then generates HiDPI modes and defaults to 4K),
+* removes **every YCbCr colour mode** (no YCbCr 4:4:4/4:2:2 flags, no YCbCr
+  4:2:0 data block), leaving RGB 4:4:4 as the only option,
+* adds a **VCDB** that permits full-range RGB.
+
+| EDID offset | original | patched | why |
+|---:|---:|---:|---|
+| `0x18` | `0x02` | **`0x0e`** | bits 4:3 = `01` RGB colour display (stock `00` says **monochrome**), bit 2 = **sRGB**, bit 1 = preferred timing (kept) |
+| `0x36`–`0x47` (DTD1) | 1920×1080@60 | **3840×2160@30**, 297.00 MHz | preferred timing → native 4K panel |
+| `0x48`–`0x59` (DTD2) | 1280×720@144 | **1920×1080@60** | the old preferred timing is kept as the second DTD; 720p144 is dropped |
+| `0x83` (CTA flags) | `0x72` | **`0x42`** | clear bits 5:4 = YCbCr 4:4:4 / 4:2:2 support; basic audio is kept |
+| CTA data blocks | Video, Audio, Speaker, VSDB, **YCbCr 4:2:0** | same minus the 4:2:0 block, plus **VCDB `E2 00 4f`** | no YCC mode left at all |
+| `0x82` (CTA DTD offset) | `0x2d` | **`0x2a`** | six bytes removed (4:2:0 block), three added (VCDB) |
+| `0x7f` (base checksum) | `0xc0` | **`0x2e`** | recomputed |
+| `0xff` (CTA checksum) | `0x58` | **`0xd9`** | recomputed |
+| firmware code checksum | `0x797c` | **`0x7980`** | recomputed (together with the register fix) |
+
+The 3840×2160@30 DTD is the CEA VIC 95 timing (4400×2250 total, 297.00 MHz,
+hfp 176 / hsw 88, vfp 8 / vsw 10, digital separate sync, `+/+`).  Its image
+size / border / flag bytes are copied from the stock DTD.
+
+Reused unchanged: chromaticity, gamma, established and standard timings, the
+Video Data Block VIC list, audio, speaker allocation, HDMI VSDB (physical
+address, 300 MHz max TMDS, HDMI VICs 1–3) and the three 2560×1440 CTA DTDs.
+
+Consequences:
+
+* Only RGB 4:4:4 is available, so a source cannot fall back to YCbCr.
+* Preferred timing is 4K30, so sources default to 3840×2160@30 (297 MHz, within
+  the declared 300 MHz TMDS limit).
+* 4K50/60 is **gone**: those need YCbCr 4:2:0 (594 MHz is impossible in 4:4:4
+  at 8 bit), and the 4:2:0 block was removed on purpose.
+* 1080p60 is still available, as the second DTD.
 
 The VCDB payload byte is CTA-861-G Table 73:
 
 ```
 bit7 QY  bit6 QS  bits5:4 S_PT  bits3:2 S_IT  bits1:0 S_CE
-QS=1 → RGB quantization range selectable via AVI Q
-QY=1 → YCC quantization range selectable via AVI YQ
+QY=1 would let a source pick the YCC range via AVI YQ (left 0 here)
+QS=1 lets a source pick the RGB range via AVI Q
 ```
 
-Both bits are set: this chip treats **RGB and YCbCr alike as full range**, so
-both permissions are what it wants.  A source still has to actually select
-full range (GPU control panel) — the VCDB only makes the non-default `Q`/`YQ`
-legal so it can be signalled in the AVI InfoFrame.
+The payload is `0x4f`: **`QY=0`**, **`QS=1`**, `S_PT=00` (No Data),
+`S_IT=11`, `S_CE=11` ("supports both over- and underscan", the common `0x0f`
+pattern).  `QY=0` because no YCbCr mode is advertised any more, so a YCC
+range permission could never be used.  The low nibble must not be left at 0 —
+`S_IT=00`/`S_CE=00` would declare "IT/CE Video Formats not supported".
 
-Everything else — chromaticity, gamma, DTDs, established timings, standard
-timings, VICs, audio, speaker allocation, HDMI VSDB, YCbCr 4:2:0 block — is
-reused unchanged.  4K60 4:2:0 is still advertised.  The primaries only govern
-colourimetry and have no effect on quantization range, so they are not touched.
+Note that `QS=1` only makes a non-default `Q` *legal*; the source still picks
+the range.  With it a GPU's "Auto"/"Default" setting normally resolves to
+full, and an explicit "Full" setting becomes legal and is signalled in the AVI
+InfoFrame (which this chip ignores anyway).
 
 ### Verify
 
 After flashing, display a black and a white patch.  Black **0** and white
 **255** means the source now sends full range; black 16 / white 235 means it
 still sends limited, and the range still has to be set on the source side.
+`ms2130s_reg --hid timing` should report RGB 4:4:4 (`0x3c47=0`, `f130=0x10`).
 
 ## Verify the register fix
 

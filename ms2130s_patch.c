@@ -55,16 +55,29 @@
  *        bit 2    = 1  (sRGB standard default colour space)
  *        bit 1    = 1  (preferred timing, already set)
  *
- *   CTA extension   : append the Video Capability Data Block
- *                      E2 00 c0   (QY=1, QS=1)
- *        QS=1 lets a source send non-default RGB quantization (AVI Q=2,
- *        full range) and QY=1 the same for YCC (AVI YQ=1).  This chip
- *        treats *both* RGB and YCbCr as full-range, so both permissions
- *        are what it wants.
+ *   base block DTD1 : preferred timing 1920x1080@60 -> 3840x2160@30
+ *        so the source sees a native 4K panel (macOS then offers HiDPI
+ *        scaling instead of a bare resolution list) and defaults to 4K.
+ *        The old 1080p60 timing moves to DTD2, replacing 720p144.
  *
- *   everything else (chromaticity, gamma, DTDs, audio, VICs) is reused,
- *   only the CTA DTD offset moves by 3 and the two EDID checksums and the
- *   firmware code checksum are recomputed.
+ *   CTA flags       : clear bits 5:4, i.e. stop advertising YCbCr 4:4:4
+ *        and 4:2:2.  With no YCC mode offered, a source has to send RGB
+ *        4:4:4, which is what this chip wants.
+ *
+ *   CTA data blocks : drop the YCbCr 4:2:0 Video Data Block (extended tag
+ *        0x0e) and append the Video Capability Data Block
+ *                      E2 00 4f   (QY=0, QS=1, S_IT=11, S_CE=11)
+ *        QS=1 lets a source send non-default RGB quantization (AVI Q=2,
+ *        full range).  QY stays 0 because no YCbCr mode is advertised any
+ *        more, so a YCC range permission would be unusable.  S_IT=00 and
+ *        S_CE=00 would mean "IT/CE Video Formats not supported"
+ *        (CTA-861-G Table 73), so declare "supports both over- and
+ *        underscan" (the common 0x0f pattern) instead.
+ *
+ *   everything else (chromaticity, gamma, established/standard timings,
+ *   audio, speaker allocation, HDMI VSDB, CTA DTDs) is reused; only the
+ *   CTA DTD offset and the two EDID checksums and the firmware code
+ *   checksum are recomputed.
  *
  * Copyright (C) 2026
  * SPDX-License-Identifier: MIT
@@ -103,15 +116,33 @@ static const struct patch_site patch_sites[] = {
 #define EDID_OFFSET	0x307
 
 /* CTA-861 Video Capability Data Block payload byte (Table 73):
- *   bit7 QY, bit6 QS, bits5:4 S_PT, bits3:2 S_IT, bits1:0 S_CE
- * QS=1 -> RGB quantization range selectable via AVI Q
- * QY=1 -> YCC quantization range selectable via AVI YQ
- * The chip expects full range on both inputs, so both are declared.
+ *   bit7 QY   0 = no data (no YCbCr mode is advertised, so nothing could
+ *                 use a YCC range permission)
+ *   bit6 QS   1 = RGB quantization range selectable via AVI Q
+ *   bits5:4 S_PT  00 = No Data (fall back to S_IT/S_CE)
+ *   bits3:2 S_IT  11 = supports both over- and underscan
+ *   bits1:0 S_CE  11 = supports both over- and underscan
+ * The chip expects full-range RGB, so QS is declared.
+ * S_IT/S_CE must not be 00: that encodes "formats not supported".
  */
-#define VCDB_PAYLOAD	0xc0
+#define VCDB_PAYLOAD	0x4f
+
+/* 3840x2160@30 (CEA VIC 95): 297.00 MHz, htotal 4400, vtotal 2250.
+ * Bytes 12..17 (image size, borders, flags) are copied from the stock
+ * 1080p DTD, so only the timing fields differ.
+ */
+static const uint8_t dtd_4k30[18] = {
+	0x04, 0x74,			/* pixel clock 29700 (x10 kHz) */
+	0x00, 0x30, 0xf2,		/* hactive 3840, hblank 560 */
+	0x70, 0x5a, 0x80,		/* vactive 2160, vblank 90 */
+	0xb0, 0x58, 0x8a, 0x00,		/* hfp 176, hsw 88, vfp 8, vsw 10 */
+	0xc4, 0x8e, 0x21, 0x00,		/* image size (same as the stock DTD) */
+	0x00, 0x1e			/* no border, digital separate sync, +/+ */
+};
 
 /* Stock EDID fingerprint, used to refuse foreign images. */
 #define EDID_STOCK_FEATURE	0x02
+#define EDID_STOCK_CTA_FLAGS	0x72
 #define EDID_STOCK_BASE_CSUM	0xc0
 #define EDID_STOCK_DTD_OFFSET	0x2d
 #define EDID_STOCK_CTA_CSUM	0x58
@@ -157,11 +188,11 @@ static void fix_edid_base_checksum(uint8_t *edid)
 	edid[0x7f] = (uint8_t)((-sum) & 0xff);
 }
 
-/* Append a VCDB to the CTA-861 data block collection, shifting the DTD area
- * and its offset.  Trailing padding is dropped first; a real DTD is never
- * truncated.
+/* Rewrite the CTA-861 data block collection: optionally drop the YCbCr 4:2:0
+ * Video Data Block, then append a VCDB, shifting the DTD area and its offset.
+ * Trailing padding is dropped first; a real DTD is never truncated.
  */
-static int edid_add_vcdb(uint8_t *edid, uint8_t payload)
+static int cta_rebuild(uint8_t *edid, int drop_y420, uint8_t payload)
 {
 	uint8_t *ext = edid + 0x80;
 	uint8_t new_ext[0x80];
@@ -181,9 +212,26 @@ static int edid_add_vcdb(uint8_t *edid, uint8_t payload)
 		return -1;
 	}
 
-	blocks_len = dtd_off - 4;
+	memset(new_ext, 0, sizeof(new_ext));
+	memcpy(new_ext, ext, 4);
+
+	/* copy the data blocks, optionally skipping the YCbCr 4:2:0 block */
+	blocks_len = 0;
+	for (i = 4; i < dtd_off; i += 1 + (ext[i] & 0x1f)) {
+		size_t len = 1 + (ext[i] & 0x1f);
+
+		if (i + len > dtd_off) {
+			fprintf(stderr, "CTA data block chain overruns the DTD offset\n");
+			return -1;
+		}
+		if (drop_y420 && (ext[i] >> 5) == 7 && len >= 2 && ext[i + 1] == 0x0e)
+			continue;
+		memcpy(new_ext + 4 + blocks_len, ext + i, len);
+		blocks_len += len;
+	}
+
 	dtd_len = 0x7f - dtd_off;
-	new_off = dtd_off + 3;
+	new_off = 4 + blocks_len + 3;
 
 	while (dtd_len > (0x7f - new_off)) {
 		if (ext[dtd_off + dtd_len - 1] != 0x00) {
@@ -193,13 +241,11 @@ static int edid_add_vcdb(uint8_t *edid, uint8_t payload)
 		dtd_len--;
 	}
 
-	memset(new_ext, 0, sizeof(new_ext));
-	memcpy(new_ext, ext, 4);
-	new_ext[2] = (uint8_t)new_off;
-	memcpy(new_ext + 4, ext + 4, blocks_len);
+	/* append the VCDB */
 	new_ext[4 + blocks_len + 0] = 0xe2;	/* tag 7 (extended), len 2 */
 	new_ext[4 + blocks_len + 1] = 0x00;	/* extended tag: VCDB */
 	new_ext[4 + blocks_len + 2] = payload;
+	new_ext[2] = (uint8_t)new_off;
 	memcpy(new_ext + new_off, ext + dtd_off, dtd_len);
 
 	sum = 0;
@@ -214,11 +260,13 @@ static int edid_add_vcdb(uint8_t *edid, uint8_t payload)
 static int edid_patch(uint8_t *fw)
 {
 	uint8_t *edid = fw + EDID_OFFSET;
+	uint8_t dtd1080[18];
 	uint32_t sum;
 	int i;
 
 	if (edid[0x18] != EDID_STOCK_FEATURE ||
 	    edid[0x7f] != EDID_STOCK_BASE_CSUM ||
+	    edid[0x83] != EDID_STOCK_CTA_FLAGS ||
 	    edid[0x82] != EDID_STOCK_DTD_OFFSET ||
 	    edid[0xff] != EDID_STOCK_CTA_CSUM ||
 	    memcmp(edid, "\x00\xff\xff\xff\xff\xff\xff\x00", 8)) {
@@ -230,7 +278,17 @@ static int edid_patch(uint8_t *fw)
 	/* RGB colour display (bits 4:3 = 01), sRGB, preferred timing */
 	edid[0x18] = (uint8_t)((edid[0x18] & 0x01) | 0x0e);
 
-	if (edid_add_vcdb(edid, VCDB_PAYLOAD) < 0)
+	/* preferred timing: 4K30 first, then keep 1080p60 as DTD2 */
+	memcpy(dtd1080, edid + 0x36, sizeof(dtd1080));
+	memcpy(edid + 0x36, dtd_4k30, sizeof(dtd_4k30));
+	memcpy(edid + 0x48, dtd1080, sizeof(dtd1080));
+
+	/* CTA flags bits 5:4 = YCbCr 4:4:4 / 4:2:2 support; drop them so a
+	 * source has no YCC mode left and must use RGB 4:4:4.
+	 */
+	edid[0x83] &= (uint8_t)~0x30;
+
+	if (cta_rebuild(edid, 1, VCDB_PAYLOAD) < 0)
 		return -1;
 
 	fix_edid_base_checksum(edid);
@@ -297,7 +355,7 @@ int main(int argc, char *argv[])
 	out_name = (nnames > 1) ? names[1] :
 		"./UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11.bin";
 	out_edid_name = (nnames > 2) ? names[2] :
-			"./UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11_edid_srgb_qsqy.bin";
+			"./UGREEN_undated_backup_24dc_797c_0xfc8e_0xfc8f_0x11_edid_srgb_rgb444_4k30.bin";
 
 	fp = fopen(in_name, "rb");
 	if (!fp) {
@@ -397,12 +455,14 @@ int main(int argc, char *argv[])
 		calc_code_csum = calculate_code_checksum(code);
 		store_code_checksum(fw, calc_code_csum);
 		printf("\nEDID patched: feature byte 0x18 = 0x%02x "
-		       "(RGB colour + sRGB), VCDB E2 00 %02x (QY=1, QS=1)\n",
+		       "(RGB colour + sRGB), VCDB E2 00 %02x (QS=1)\n",
 		       fw[EDID_OFFSET + 0x18], VCDB_PAYLOAD);
-		printf("  base checksum: %02x, CTA checksum: %02x, "
+		printf("  preferred timing: 3840x2160@30, CTA flags: %02x "
+		       "(no YCbCr 4:4:4/4:2:2, no 4:2:0)\n"
+		       "  base checksum: %02x, CTA checksum: %02x, "
 		       "CTA DTD offset: %02x\n",
-		       fw[EDID_OFFSET + 0x7f], fw[EDID_OFFSET + 0xff],
-		       fw[EDID_OFFSET + 0x82]);
+		       fw[EDID_OFFSET + 0x83], fw[EDID_OFFSET + 0x7f],
+		       fw[EDID_OFFSET + 0xff], fw[EDID_OFFSET + 0x82]);
 		printf("New code checksum: %04x\n", calc_code_csum);
 		if (write_image(out_edid_name, fw, file_len) < 0)
 			goto out;
