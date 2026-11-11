@@ -38,6 +38,7 @@ make
 | `..._0xfc8e_0xfc8f_0x11.bin` | register fix only (proc-amp bypassed) |
 | `..._edid_srgb_rgb444_4k30.bin` | register fix + sRGB/RGB 4:4:4 EDID, 4K30 CEA preferred, `QS=1` |
 | `..._edid_srgb_rgb444_4k30_it.bin` | register fix + all-IT CVT-RB EDID, 4K30 CVT-RB preferred |
+| `..._edid_srgb_rgb444_4k30_ce.bin` | register fix + all-CE VIC EDID, 4K30 CEA preferred, RGB 4:4:4, `QS=0` |
 
 ## The problem
 
@@ -64,6 +65,8 @@ reset writes use `0x11` (luma/chroma processing disabled) instead.
 | `..._edid_srgb_rgb444_4k30.bin` | Pre-built image with that EDID. |
 | `edid_srgb_rgb444_4k30_it.bin` | 256-byte EDID: all-IT CVT-RB (4K30, 1080p60, 1440p60, 1440p30, 1080p30). |
 | `..._edid_srgb_rgb444_4k30_it.bin` | Pre-built image with that EDID. |
+| `edid_srgb_rgb444_4k30_ce.bin` | 256-byte EDID: all-CE VICs (4K30, 1080p60, 1080p30, 1080p50/25/24, 720p), RGB 4:4:4 only, `QS=0`. |
+| `..._edid_srgb_rgb444_4k30_ce.bin` | Pre-built image with that EDID. |
 
 ## Build
 
@@ -98,6 +101,7 @@ code checksum.
 |---|---|
 | `edid_srgb_rgb444_4k30.bin` | sRGB + RGB 4:4:4; preferred 4K30 CEA (297 MHz); no YCbCr 4:4:4/4:2:2/4:2:0; VCDB `QS=1`. |
 | `edid_srgb_rgb444_4k30_it.bin` | All-IT CVT-RB: preferred 4K30 (262.75 MHz), 1080p60 (138.50), 1440p60 (241.50), 1440p30 (119.00), 1080p30 (68.25); no Video Data Block, no 4:2:0 block, no VCDB; HDMI VSDB keeps max TMDS 300 MHz but clears `HDMI_Video_Present` (no HDMI VIC list); audio and speaker allocation kept. |
+| `edid_srgb_rgb444_4k30_ce.bin` | All-CE VICs: preferred 4K30 (VIC 95, 297 MHz), 1080p60 (16), 1080p30 (34), 1080p50/25/24 (31/33/32), 720p (4/19/60/61/62); RGB 4:4:4 only, no 4:2:0; VSDB max TMDS 300 MHz, no HDMI VIC; VCDB `QS=0` (CE formats default to limited). 2560x1440 has no CTA VIC and is not included. |
 
 The all-IT variant uses only CVT-RB timings, so no mode matches a CTA-861
 Video Format; a source that follows the CTA default then sends full-range
